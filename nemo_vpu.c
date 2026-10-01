@@ -1,9 +1,12 @@
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 
+#include <media/v4l2-fh.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-device.h>	// v4l2 framework level device
 #include <media/v4l2-dev.h>	// video_device that becomes /dev/videoX
+#include <media/v4l2-mem2mem.h>
 
 /* 
  * A platform device is something that is not enumerated automatically.
@@ -14,12 +17,28 @@
  * Apparently drivers can be platform drivers which define a platform device with probe etc,
  * or simple software drivers with module init and exit.
  * 
- * Only platform device drivers have probe.  Software driver is built with init and exit.
+ * 
  */
 
+// nemo_dev - Stores handlers for the whole device
 struct nemo_dev {
 	struct v4l2_device v4l2_dev;	// v4l2 device 
 	struct video_device vid_dev;	// video device -> /dev/videoX
+	struct v4l2_m2m_dev *m2m_dev;   // m2m_dev scheduler to be shared by whole device.
+	struct mutex lock;
+};
+
+
+/* 
+ * nemo_ctx - Stores handlers for a single instance
+ * Each open file will get its own nemo_ctx and m2m queue pair.
+ */
+struct nemo_ctx {
+	struct v4l2_fh fh;
+	struct nemo_dev *dev;
+	struct v4l2_m2m_ctx *m2m_ctx;
+	struct v4l2_pix_format src_fmt;
+	struct v4l2_pix_format dst_fmt;
 };
 
 static struct nemo_dev *g_nemo;
