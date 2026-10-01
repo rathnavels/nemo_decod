@@ -1,4 +1,5 @@
 #include <linux/module.h>
+#include <linux/kernel.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 
@@ -7,6 +8,8 @@
 #include <media/v4l2-device.h>	// v4l2 framework level device
 #include <media/v4l2-dev.h>	// video_device that becomes /dev/videoX
 #include <media/v4l2-mem2mem.h>
+
+#define NEMO_CAPS (V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING)
 
 /* 
  * A platform device is something that is not enumerated automatically.
@@ -28,23 +31,86 @@ struct nemo_dev {
 	struct mutex lock;
 };
 
-
 /* 
- * nemo_ctx - Stores handlers for a single instance
+ * nemo_ctx - Stores handlers for a single instance/session
  * Each open file will get its own nemo_ctx and m2m queue pair.
  */
 struct nemo_ctx {
 	struct v4l2_fh fh;
 	struct nemo_dev *dev;
 	struct v4l2_m2m_ctx *m2m_ctx;
-	struct v4l2_pix_format src_fmt;
-	struct v4l2_pix_format dst_fmt;
+	struct v4l2_pix_format_mplane out_fmt;
+	struct v4l2_pix_format_mplane cap_fmt;
 };
 
 static struct nemo_dev *g_nemo;
 
+static void nemo_fill_format(struct v4l2_pix_format_mplane *pix_mp, u32 width, u32 height)
+{
+	memset(pix_mp, 0, sizeof(*pix_mp));
+
+	pix_mp->width = clamp_t(u32, width, 64, 1920) & ~1U; // ~1U makes it even number
+	pix_mp->height = clamp_t(u32, height, 64, 1080) & ~1U;
+	pix_mp->pixelformat = V4L2_PIX_FMT_NV12M;
+	pix_mp->field = V4L2_FIELD_NONE;
+	pix_mp->num_planes = 2;
+
+	for (int i = 0; i < 2; i++)
+	{
+		pix_mp->plane_fmt[i].bytesperline = pix_mp->width;
+		pix_mp->plane_fmt[i].sizeimage = pix_mp->width * pix_mp->height * ((i & 1) ? 1 : (1/2));
+	}
+}
+
+static struct v4l2_pix_format_mplane* nemo_get_format(struct nemo_ctx *ctx, enum v4l2_buf_type type)
+{
+	switch (type)
+	{
+		case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
+			return &ctx->out_fmt;
+		case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+			return &ctx->cap_fmt;
+		default:
+			return NULL;
+	}
+}
+
+static int nemo_open(struct file *file)
+{
+	struct nemo_dev *dev = video_drvdata(file);
+	struct nemo_ctx *ctx;
+
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+
+	ctx->dev = dev;
+
+	nemo_fill_format(&ctx->out_fmt, 640, 480);
+	nemo_fill_format(&ctx->cap_fmt, 640, 480);
+	
+	v4l2_fh_init(&ctx->fh, video_devdata(file));
+	file->private_data = &ctx->fh;
+	v4l2_fh_add(&ctx->fh);
+
+	return 0;
+}
+
+static int nemo_release(struct file *file)
+{
+	struct nemo_ctx *ctx = container_of(file->private_data, struct nemo_ctx, fh);
+
+	v4l2_fh_del(&ctx->fh);
+	v4l2_fh_exit(&ctx->fh);
+	kfree(ctx);
+
+	return 0;
+}
+
 static const struct v4l2_file_operations nemo_fops = {
 	.owner = THIS_MODULE,
+	.open = nemo_open,
+	.release = nemo_release,
 	.unlocked_ioctl = video_ioctl2,
 };
 
@@ -52,7 +118,7 @@ static int nemo_querycap(struct file *file, void *priv, struct v4l2_capability *
 {
 	strscpy(cap->driver, "nemo", sizeof(cap->driver));
 	strscpy(cap->card, "Nemo VPU Decoder", sizeof(cap->card));
-	cap->device_caps = V4L2_CAP_VIDEO_M2M;
+	cap->device_caps = NEMO_CAPS;
 	cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
 
 	return 0;
@@ -97,7 +163,9 @@ static int __init nemo_init(void)
 	ndev->vid_dev.fops = &nemo_fops;
 	ndev->vid_dev.ioctl_ops = &nemo_ioctl_ops;
 	ndev->vid_dev.release = video_device_release_empty;
-	ndev->vid_dev.device_caps = V4L2_CAP_VIDEO_M2M;
+	ndev->vid_dev.device_caps = NEMO_CAPS;
+
+	video_set_drvdata(&ndev->vid_dev, ndev);
 
 	ret = video_register_device(&ndev->vid_dev, VFL_TYPE_VIDEO, -1);
 	if (ret)
