@@ -58,11 +58,11 @@ static void nemo_fill_format(struct v4l2_pix_format_mplane *pix_mp, u32 width, u
 	for (int i = 0; i < 2; i++)
 	{
 		pix_mp->plane_fmt[i].bytesperline = pix_mp->width;
-		pix_mp->plane_fmt[i].sizeimage = pix_mp->width * pix_mp->height * ((i & 1) ? 1 : (1/2));
+		pix_mp->plane_fmt[i].sizeimage = pix_mp->width * pix_mp->height / ((i & 1) ? 2 : 1);
 	}
 }
 
-static struct v4l2_pix_format_mplane* nemo_get_format(struct nemo_ctx *ctx, enum v4l2_buf_type type)
+static struct v4l2_pix_format_mplane* nemo_get_queue_format(struct nemo_ctx *ctx, enum v4l2_buf_type type)
 {
 	switch (type)
 	{
@@ -73,6 +73,47 @@ static struct v4l2_pix_format_mplane* nemo_get_format(struct nemo_ctx *ctx, enum
 		default:
 			return NULL;
 	}
+}
+
+static int nemo_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
+{
+	if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE || f->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+		return -EINVAL;
+
+	nemo_fill_format(&f->fmt.pix_mp, f->fmt.pix_mp.width, f->fmt.pix_mp.height);
+
+	return 0;
+}
+
+static int nemo_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
+{
+	struct nemo_ctx *ctx = container_of(priv, struct nemo_ctx, fh);
+	struct v4l2_pix_format_mplane *pix_mp;
+
+	pix_mp = nemo_get_queue_format(ctx, f->type);
+	if (!pix_mp)
+		return -EINVAL;
+
+	f->fmt.pix_mp = *pix_mp;
+	return 0;
+}
+
+static int nemo_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
+{
+	struct nemo_ctx *ctx = container_of(priv, struct nemo_ctx, fh);
+	struct v4l2_pix_format_mplane *pix_mp;
+	int ret;
+
+	pix_mp = nemo_get_queue_format(ctx, f->type);
+	if (!pix_mp)
+		return -EINVAL;
+
+	ret = nemo_try_fmt(file, priv, f);
+	if (ret)
+		return ret;
+
+	*pix_mp = f->fmt.pix_mp;
+	return 0;
 }
 
 static int nemo_open(struct file *file)
@@ -126,6 +167,12 @@ static int nemo_querycap(struct file *file, void *priv, struct v4l2_capability *
 
 static const struct v4l2_ioctl_ops nemo_ioctl_ops = {
 	.vidioc_querycap = nemo_querycap,
+	.vidioc_g_fmt_vid_out_mplane = nemo_g_fmt,
+	.vidioc_g_fmt_vid_cap_mplane = nemo_g_fmt,
+	.vidioc_s_fmt_vid_out_mplane = nemo_s_fmt,
+	.vidioc_s_fmt_vid_cap_mplane = nemo_s_fmt,
+	.vidioc_try_fmt_vid_out_mplane = nemo_try_fmt,
+	.vidioc_try_fmt_vid_cap_mplane = nemo_try_fmt,
 };
 
 /*
